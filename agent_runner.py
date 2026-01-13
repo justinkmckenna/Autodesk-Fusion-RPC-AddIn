@@ -259,6 +259,12 @@ def _basic_validate_observation(observation):
             for key in ("x", "y", "width", "height"):
                 if not isinstance(bbox.get(key), int):
                     raise ValueError("alert screen_bbox fields must be integers")
+    for entry in observation.get("extraction", {}).get("measurements", {}).get("entries", []):
+        bbox = entry.get("screen_bbox")
+        if bbox:
+            for key in ("x", "y", "width", "height"):
+                if not isinstance(bbox.get(key), int):
+                    raise ValueError("measurement screen_bbox fields must be integers")
 
 
 def _normalize_observation(partial, goal, image_paths):
@@ -277,7 +283,7 @@ def _normalize_observation(partial, goal, image_paths):
     panels = observation["ui_state"].get("panels_visible", {})
 
     extraction = partial.get("extraction", {})
-    observation["extraction"].update({k: v for k, v in extraction.items() if k != "timeline"})
+    observation["extraction"].update({k: v for k, v in extraction.items() if k not in ("timeline", "measurements")})
 
     timeline = extraction.get("timeline", {}) if isinstance(extraction, dict) else {}
     features = timeline.get("features_visible", []) if isinstance(timeline, dict) else []
@@ -323,6 +329,27 @@ def _normalize_observation(partial, goal, image_paths):
     if alerts:
         observation["extraction"]["alerts"] = alerts
 
+    measurements = {}
+    if isinstance(extraction, dict) and "measurements" in extraction:
+        measurements = extraction.get("measurements", {})
+    if measurements:
+        entries = measurements.get("entries", [])
+        normalized_entries = []
+        for entry in entries:
+            bbox = entry.get("screen_bbox")
+            if isinstance(bbox, list) and len(bbox) == 4:
+                bbox = {"x": int(bbox[0]), "y": int(bbox[1]), "width": int(bbox[2]), "height": int(bbox[3])}
+            elif isinstance(bbox, dict):
+                bbox = {
+                    "x": int(bbox.get("x", 0)),
+                    "y": int(bbox.get("y", 0)),
+                    "width": int(bbox.get("width", 0)),
+                    "height": int(bbox.get("height", 0)),
+                }
+            normalized_entries.append({**entry, "screen_bbox": bbox} if bbox else entry)
+        measurements["entries"] = normalized_entries
+        observation["extraction"]["measurements"] = measurements
+
     if "confidence" in partial:
         observation["confidence"] = float(partial.get("confidence", 0.0))
 
@@ -340,8 +367,8 @@ def _read_image_b64(path):
         return base64.b64encode(fh.read()).decode("ascii")
 
 
-def _build_vision_prompt():
-    return (
+def _build_vision_prompt(focus=None):
+    prompt = (
         "You are a vision extractor for Autodesk Fusion UI. "
         "Return JSON only, strictly matching VisionObservation schema v1.0. "
         "Include all required top-level fields: schema_version, timestamp, ui_state, "
@@ -352,12 +379,18 @@ def _build_vision_prompt():
         "type_hint, is_suppressed, screen_bbox {x,y,width,height} as integers, and confidence. "
         "Set ui_state.panels_visible.timeline true if the timeline is visible. "
         "If the browser panel is visible, set ui_state.panels_visible.browser true. "
+        "If measure panel images are provided, extract numeric measurement entries into "
+        "extraction.measurements.entries with metric, value, units, label, screen_bbox {x,y,width,height}, and confidence. "
+        "If the Results section shows Distance/Angle, always include them as entries. "
         "If error markers are visible, add them to extraction.alerts with severity and text. "
         "If unsure, leave fields empty and lower confidence. No extra text."
     )
+    if focus == "measure_panel":
+        prompt += " Focus on the measure panel images; measurements are the top priority."
+    return prompt
 
 
-def _vision_request_payload(image_paths, goal):
+def _vision_request_payload(image_paths, goal, focus=None):
     images = []
     for path in image_paths:
         b64 = _read_image_b64(path)
@@ -367,7 +400,7 @@ def _vision_request_payload(image_paths, goal):
         "model": os.environ.get("FUSION_VISION_MODEL", "gpt-4o-mini"),
         "response_format": {"type": "json_object"},
         "messages": [
-            {"role": "system", "content": _build_vision_prompt()},
+            {"role": "system", "content": _build_vision_prompt(focus=focus)},
             {
                 "role": "user",
                 "content": [
@@ -376,8 +409,12 @@ def _vision_request_payload(image_paths, goal):
                         "text": (
                             "Goal: "
                             + goal
-                            + ". Extract only timeline-focused data for now (timeline features + alerts). "
-                            + "Return JSON-only VisionObservation."
+                            + (
+                                ". Focus on measurements from the measure panel."
+                                if focus == "measure_panel"
+                                else ". Extract only timeline-focused data for now (timeline features + alerts)."
+                            )
+                            + " Return JSON-only VisionObservation."
                         ),
                     },
                     *images,
@@ -403,6 +440,7 @@ def vision_client(
     max_attempts=3,
     initial_delay=0.0,
     raw_log_path=None,
+    focus=None,
 ):
     api_key = os.environ.get("FUSION_VISION_API_KEY")
     endpoint = os.environ.get("FUSION_VISION_ENDPOINT", "https://api.openai.com/v1/chat/completions")
@@ -412,7 +450,7 @@ def vision_client(
     if initial_delay > 0:
         time.sleep(initial_delay)
 
-    payload = _vision_request_payload(image_paths, goal)
+    payload = _vision_request_payload(image_paths, goal, focus=focus)
     data = json.dumps(payload).encode("utf-8")
     request = urllib.request.Request(
         endpoint,
@@ -541,6 +579,7 @@ class Planner:
         self.stuck_count = 0
         self.last_progress = None
         self.vision_confirmed = False
+        self.baseline_measured = False
 
     def update_progress(self, progress):
         if self.last_progress is None:
@@ -568,7 +607,6 @@ class Planner:
             self.state = "MEASURE_BASELINE"
             return {"tool": "wait", "arguments": {"milliseconds": 300}, "intent": "navigate"}
         if self.state == "MEASURE_BASELINE":
-            self.state = "EDIT"
             return {"tool": "wait", "arguments": {"milliseconds": 300}, "intent": "measure"}
         if self.state == "EDIT":
             self.state = "VERIFY"
@@ -587,6 +625,26 @@ def click_bbox_center(client, bbox, calibration, region_name, scale_factor=1.0):
     return client.call_tool(
         "mouse_click",
         {"x": int(round(abs_x)), "y": int(round(abs_y))},
+    )
+
+
+def _click_canvas_relative(client, calibration, rel_x, rel_y, scale_factor=1.0):
+    canvas = _get_region(calibration, "canvas")
+    abs_x = canvas["x"] + canvas["width"] * rel_x
+    abs_y = canvas["y"] + canvas["height"] * rel_y
+    return client.call_tool(
+        "mouse_click",
+        {"x": int(round(abs_x * scale_factor)), "y": int(round(abs_y * scale_factor))},
+    )
+
+
+def _click_region_relative(client, calibration, region_name, rel_x, rel_y, scale_factor=1.0):
+    region = _get_region(calibration, region_name)
+    abs_x = region["x"] + region["width"] * rel_x
+    abs_y = region["y"] + region["height"] * rel_y
+    return client.call_tool(
+        "mouse_click",
+        {"x": int(round(abs_x * scale_factor)), "y": int(round(abs_y * scale_factor))},
     )
 
 
@@ -622,7 +680,7 @@ def _capture_plan(observation, planner_state, calibration, force_measure=False):
             "measure_dialog_open",
             False,
         )
-    if force_measure or measure_open or planner_state == "VERIFY":
+    if force_measure or measure_open or planner_state in ("VERIFY", "MEASURE_BASELINE"):
         if "measure_panel" in calibration:
             regions.append("measure_panel")
 
@@ -684,6 +742,45 @@ def _bootstrap(client, run_dir, calibration, vision_delay=0.0):
     return True, observation
 
 
+def _measure_baseline(client, actions_log, calibration, scale_factor):
+    _click_canvas_relative(client, calibration, 0.5, 0.5, scale_factor=scale_factor)
+    _log_action(actions_log, {"tool": "mouse_click", "region_name": "canvas", "target": "focus"})
+    time.sleep(0.1)
+
+    client.call_tool("key_press", {"keys": ["escape"]})
+    client.call_tool("key_press", {"keys": ["escape"]})
+    _log_action(actions_log, {"tool": "key_press", "keys": ["escape", "escape"]})
+
+    client.call_tool("key_press", {"keys": ["i"]})
+    _log_action(actions_log, {"tool": "key_press", "keys": ["i"]})
+
+    pre = client.call_tool("capture_screen", {"region_name": "measure_panel"})
+    _log_action(actions_log, {"tool": "capture_screen", "region_name": "measure_panel", "result": pre})
+
+    # Best-effort: enable snap points + vertex filter for point-to-point measurement.
+    _click_region_relative(client, calibration, "measure_panel", 0.14, 0.30, scale_factor=scale_factor)
+    _log_action(actions_log, {"tool": "mouse_click", "region_name": "measure_panel", "target": "selection_filter"})
+    time.sleep(0.1)
+    _click_region_relative(client, calibration, "measure_panel", 0.42, 0.30, scale_factor=scale_factor)
+    _log_action(actions_log, {"tool": "mouse_click", "region_name": "measure_panel", "target": "vertex_filter"})
+    time.sleep(0.1)
+    _click_region_relative(client, calibration, "measure_panel", 0.12, 0.22, scale_factor=scale_factor)
+    _log_action(actions_log, {"tool": "mouse_click", "region_name": "measure_panel", "target": "show_snap_points"})
+    time.sleep(0.1)
+
+    # Click two interior cutout corners (approx) to force a distance measurement.
+    _click_canvas_relative(client, calibration, 0.62, 0.43, scale_factor=scale_factor)
+    _log_action(actions_log, {"tool": "mouse_click", "region_name": "canvas", "target": "cutout_top_right"})
+    time.sleep(0.15)
+    _click_canvas_relative(client, calibration, 0.62, 0.62, scale_factor=scale_factor)
+    _log_action(actions_log, {"tool": "mouse_click", "region_name": "canvas", "target": "cutout_bottom_right"})
+
+    post = client.call_tool("capture_screen", {"region_name": "measure_panel"})
+    _log_action(actions_log, {"tool": "capture_screen", "region_name": "measure_panel", "result": post})
+
+    return [pre.get("image_path"), post.get("image_path")]
+
+
 def run_simple(client, run_dir):
     actions_log = os.path.join(run_dir, "actions.jsonl")
     calibration = _load_calibration()
@@ -704,6 +801,7 @@ def run_loop(client, run_dir, max_steps, force_measure=False, vision_delay=0.0):
     last_observation = bootstrap_obs
     if not ok:
         return
+    planner.state = "MEASURE_BASELINE"
 
     for step in range(max_steps):
         try:
@@ -721,6 +819,48 @@ def run_loop(client, run_dir, max_steps, force_measure=False, vision_delay=0.0):
 
         if captures and screen_info:
             scale_factor, ratio = _update_scale_from_capture(screen_info, captures[0])
+        else:
+            scale_factor = 1.0
+
+        image_paths = [item.get("image_path") for item in captures if item.get("image_path")]
+
+        focus = None
+        if planner.state == "MEASURE_BASELINE" and not planner.baseline_measured:
+            measure_paths = _measure_baseline(client, actions_log, calibration, scale_factor)
+            # Use measure panel captures only to force measurement extraction.
+            image_paths = [p for p in measure_paths if p]
+            focus = "measure_panel"
+
+        if captures and screen_info:
+            _log_action(
+                actions_log,
+                {
+                    "tool": "scale_check",
+                    "display": {"width": screen_info.get("width"), "height": screen_info.get("height")},
+                    "capture": {"width": captures[0].get("width"), "height": captures[0].get("height")},
+                    "ratio": ratio,
+                    "scale_factor": scale_factor,
+                },
+            )
+
+        try:
+            raw_path = os.path.join(obs_dir, f"vision_raw-{step+1:03d}.txt")
+            observation = vision_client(
+                image_paths,
+                "Modify back plate to fit Raspberry Pi 3B",
+                initial_delay=vision_delay,
+                raw_log_path=raw_path,
+                focus=focus,
+            )
+            try:
+                _basic_validate_observation(observation)
+            except Exception as exc:
+                observation = _safe_observation_on_invalid(observation, exc)
+        except Exception as exc:
+            observation = _error_observation("Modify back plate to fit Raspberry Pi 3B", image_paths, exc)
+
+        if captures and screen_info:
+            scale_factor, ratio = _update_scale_from_capture(screen_info, captures[0])
             _log_action(
                 actions_log,
                 {
@@ -733,22 +873,6 @@ def run_loop(client, run_dir, max_steps, force_measure=False, vision_delay=0.0):
             )
         else:
             scale_factor = 1.0
-
-        image_paths = [item.get("image_path") for item in captures if item.get("image_path")]
-        try:
-            raw_path = os.path.join(obs_dir, f"vision_raw-{step+1:03d}.txt")
-            observation = vision_client(
-                image_paths,
-                "Modify back plate to fit Raspberry Pi 3B",
-                initial_delay=vision_delay,
-                raw_log_path=raw_path,
-            )
-            try:
-                _basic_validate_observation(observation)
-            except Exception as exc:
-                observation = _safe_observation_on_invalid(observation, exc)
-        except Exception as exc:
-            observation = _error_observation("Modify back plate to fit Raspberry Pi 3B", image_paths, exc)
         obs_path = os.path.join(obs_dir, f"observation-{step+1:03d}.json")
         with open(obs_path, "w", encoding="utf-8") as fh:
             json.dump(observation, fh, indent=2)
@@ -765,6 +889,20 @@ def run_loop(client, run_dir, max_steps, force_measure=False, vision_delay=0.0):
 
         if action is None:
             break
+
+        if planner.state == "MEASURE_BASELINE":
+            entries = observation.get("extraction", {}).get("measurements", {}).get("entries", [])
+            good = any(e.get("confidence", 0.0) >= 0.7 for e in entries)
+            if good:
+                planner.baseline_measured = True
+                planner.state = "VERIFY"
+            else:
+                _log_action(
+                    actions_log,
+                    {"tool": "request_better_view", "reason": "Measurement confidence < 0.7"},
+                )
+                time.sleep(0.5)
+                continue
 
         if not planner.vision_confirmed:
             allowed = {"navigate", "measure", "request_better_view", "wait", "escape"}
