@@ -137,6 +137,16 @@ def handle_key_press(params):
     return {"ok": True}
 
 
+def handle_mouse_scroll(params):
+    _require_pyautogui()
+    delta = int(params.get("delta_y", 0))
+    steps = int(params.get("steps", 1))
+    for _ in range(max(1, steps)):
+        pyautogui.scroll(delta)
+        time.sleep(0.02)
+    return {"ok": True}
+
+
 def handle_wait(params):
     time.sleep(max(0, params.get("milliseconds", 0)) / 1000.0)
     return {"ok": True}
@@ -195,6 +205,7 @@ TOOLS = {
     "mouse_drag": handle_mouse_drag,
     "type_text": handle_type_text,
     "key_press": handle_key_press,
+    "mouse_scroll": handle_mouse_scroll,
     "wait": handle_wait,
     "save_snapshot": handle_save_snapshot,
     "set_focus_region": handle_set_focus_region,
@@ -272,6 +283,19 @@ TOOL_SCHEMAS = [
                 "keys": {"type": "array", "items": {"type": "string"}},
             },
             "required": ["keys"],
+            "additionalProperties": False,
+        },
+    },
+    {
+        "name": "mouse_scroll",
+        "description": "Scroll vertically by delta_y for a number of steps.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "delta_y": {"type": "integer"},
+                "steps": {"type": "integer"},
+            },
+            "required": ["delta_y"],
             "additionalProperties": False,
         },
     },

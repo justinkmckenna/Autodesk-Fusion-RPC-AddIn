@@ -3,6 +3,7 @@
   "timeline": {"x": 0, "y": 960, "width": 1203, "height": 120},
   "browser": {"x": 0, "y": 179, "width": 215, "height": 781},
   "measure_panel": {"x": 953, "y": 348, "width": 250, "height": 520},
+  "viewcube": {"x": 1050, "y": 190, "width": 150, "height": 150},
   "sketch_dimension": {"x": 415, "y": 220, "width": 700, "height": 520},
   "sketch_palette": {"x": 923, "y": 220, "width": 260, "height": 520}
 }
