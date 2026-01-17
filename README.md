@@ -59,3 +59,4 @@ python3 agent_runner.py --connect 127.0.0.1:8765
 - `get_screen_info` is available for Retina scale detection to avoid click offsets.
 - Vision model integration uses the built-in vision client. Set `FUSION_VISION_API_KEY` and optional `FUSION_VISION_MODEL`/`FUSION_VISION_ENDPOINT` (OpenAI-compatible).
 - You can also set these values in a `.env` file in the project root (or set `FUSION_ENV_PATH` to point elsewhere).
+- For measurement steps, turn **off** the background grid in Fusion and set selection filters to **Body Vertices** so clicks snap to corners.

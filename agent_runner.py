@@ -72,6 +72,153 @@ def _center_of_bbox(bbox):
     return (bbox["x"] + bbox["width"] / 2.0, bbox["y"] + bbox["height"] / 2.0)
 
 
+def _compute_silhouette_bbox(image_path, threshold=30):
+    from PIL import Image
+
+    img = Image.open(image_path).convert("RGB")
+    px = img.load()
+    w, h = img.size
+    sample = []
+    for y in range(0, min(30, h)):
+        for x in range(0, min(30, w)):
+            sample.append(px[x, y])
+    if not sample:
+        return None
+    bg = tuple(sum(c[i] for c in sample) // len(sample) for i in range(3))
+    bg_brightness = sum(bg) / 3.0
+
+    left = w
+    right = 0
+    top = h
+    bottom = 0
+    found = False
+    for y in range(0, h, 2):
+        for x in range(0, w, 2):
+            r, g, b = px[x, y]
+            brightness = (r + g + b) / 3.0
+            # Prefer dark pixels (model) vs light grid lines.
+            if brightness < bg_brightness - 18:
+                found = True
+                if x < left:
+                    left = x
+                if x > right:
+                    right = x
+                if y < top:
+                    top = y
+                if y > bottom:
+                    bottom = y
+
+    if not found:
+        # Fallback to color-difference thresholding.
+        left = w
+        right = 0
+        top = h
+        bottom = 0
+        found = False
+        for y in range(0, h, 2):
+            for x in range(0, w, 2):
+                r, g, b = px[x, y]
+                if abs(r - bg[0]) + abs(g - bg[1]) + abs(b - bg[2]) > threshold:
+                    found = True
+                    if x < left:
+                        left = x
+                    if x > right:
+                        right = x
+                    if y < top:
+                        top = y
+                    if y > bottom:
+                        bottom = y
+        if not found:
+            return None
+
+    return {"left": left, "right": right, "top": top, "bottom": bottom, "width": w, "height": h}
+
+
+def _find_dark_row_targets(image_path, min_span=80):
+    if not image_path or not os.path.exists(image_path):
+        return None
+    try:
+        from PIL import Image
+    except Exception:
+        return None
+
+    img = Image.open(image_path).convert("RGB")
+    px = img.load()
+    w, h = img.size
+    sample = []
+    for y in range(0, min(30, h)):
+        for x in range(0, min(30, w)):
+            sample.append(px[x, y])
+    if not sample:
+        return None
+    bg = tuple(sum(c[i] for c in sample) // len(sample) for i in range(3))
+    bg_brightness = sum(bg) / 3.0
+
+    best = None
+    for y in range(0, h, 4):
+        left = None
+        right = None
+        count = 0
+        for x in range(0, w, 2):
+            r, g, b = px[x, y]
+            brightness = (r + g + b) / 3.0
+            if brightness < bg_brightness - 18:
+                count += 1
+                if left is None:
+                    left = x
+                right = x
+        if left is None or right is None or (right - left) < min_span:
+            continue
+        score = count * (right - left)
+        if best is None or score > best["score"]:
+            best = {"y": y, "left": left, "right": right, "score": score}
+    return best
+
+
+def _looks_like_measure_panel(image_path):
+    if not image_path or not os.path.exists(image_path):
+        return False
+    try:
+        from PIL import Image
+
+        img = Image.open(image_path).convert("RGB")
+        pixels = list(img.getdata())
+        total = len(pixels)
+        if total == 0:
+            return False
+        stride = max(1, total // 10000)
+        dark = 0
+        count = 0
+        bright_sum = 0.0
+        for idx in range(0, total, stride):
+            r, g, b = pixels[idx]
+            brightness = (r + g + b) / 3.0
+            bright_sum += brightness
+            count += 1
+            if brightness < 120:
+                dark += 1
+        mean_brightness = bright_sum / max(1, count)
+        dark_ratio = dark / max(1, count)
+        return mean_brightness < 190 and dark_ratio > 0.08
+    except Exception:
+        return False
+
+
+def _point_in_region(x, y, region):
+    return (
+        region["x"] <= x <= region["x"] + region["width"]
+        and region["y"] <= y <= region["y"] + region["height"]
+    )
+
+
+def _shift_y_below_panel(current_y, panel, canvas):
+    new_y = panel["y"] + panel["height"] + 40
+    max_y = canvas["y"] + canvas["height"] - 10
+    if new_y > max_y:
+        new_y = max(canvas["y"] + 10, panel["y"] - 40)
+    return new_y
+
+
 class MCPClient:
     def __init__(self, server_cmd=None, connect_addr=None):
         self.process = None
@@ -290,7 +437,7 @@ def _normalize_observation(partial, goal, image_paths):
 
     extraction = partial.get("extraction", {})
     observation["extraction"].update(
-        {k: v for k, v in extraction.items() if k not in ("timeline", "measurements", "viewcube")}
+        {k: v for k, v in extraction.items() if k not in ("timeline", "measurements", "viewcube", "post_click")}
     )
 
     timeline = extraction.get("timeline", {}) if isinstance(extraction, dict) else {}
@@ -379,6 +526,12 @@ def _normalize_observation(partial, goal, image_paths):
         viewcube["targets"] = normalized_targets
         observation["extraction"]["viewcube"] = viewcube
 
+    post_click = []
+    if isinstance(extraction, dict) and "post_click" in extraction:
+        post_click = extraction.get("post_click", [])
+    if post_click:
+        observation["extraction"]["post_click"] = post_click
+
     if "confidence" in partial:
         observation["confidence"] = float(partial.get("confidence", 0.0))
 
@@ -416,6 +569,8 @@ def _build_vision_prompt(focus=None):
         "If measure panel images are provided, extract numeric measurement entries into "
         "extraction.measurements.entries with metric, value, units, label, screen_bbox {x,y,width,height}, and confidence. "
         "If the Results section shows Distance/Angle, always include them as entries. "
+        "If post-click crop images are provided, include extraction.post_click entries with "
+        "label, on_silhouette (true/false), highlight_visible (true/false), and confidence. "
         "If error markers are visible, add them to extraction.alerts with severity and text. "
         "If unsure, leave fields empty and lower confidence. No extra text."
     )
@@ -454,6 +609,7 @@ def _vision_request_payload(image_paths, goal, focus=None):
                                     else ". Extract only timeline-focused data for now (timeline features + alerts)."
                                 )
                             )
+                            + (" Post-click crops follow the measure panel images." if focus == "measure_panel" else "")
                             + " Return JSON-only VisionObservation."
                         ),
                     },
@@ -586,6 +742,7 @@ def _error_observation(goal, image_paths, error):
             "measurements": {"measure_dialog_open": False, "entries": []},
             "timeline": {"visible": False, "highlighted_feature": None, "features_visible": []},
             "viewcube": {"visible": False, "face": "Unknown", "targets": []},
+            "post_click": [],
             "alerts": [],
         },
         "task_state": {
@@ -624,6 +781,12 @@ class Planner:
         self.action_queue = []
         self.measurement_attempts = 0
         self.awaiting_measurement = False
+        self.measure_variant = 0
+        self.last_click_distance = None
+        self.last_post_click_crops = []
+        self.nav_done = False
+        self.last_canvas_path = None
+        self.last_scale_factor = 1.0
 
     def update_progress(self, progress):
         if self.last_progress is None:
@@ -692,6 +855,21 @@ def _click_region_relative(client, calibration, region_name, rel_x, rel_y, scale
         "mouse_click",
         {"x": int(round(abs_x * scale_factor)), "y": int(round(abs_y * scale_factor))},
     )
+
+
+def _capture_click_crop(client, actions_log, x, y, label):
+    crop = {
+        "x": max(0, int(x - 120)),
+        "y": max(0, int(y - 120)),
+        "width": 240,
+        "height": 240,
+    }
+    result = client.call_tool("capture_screen", {"region": crop})
+    _log_action(
+        actions_log,
+        {"tool": "capture_screen", "region_name": "post_click_crop", "label": label, "result": result},
+    )
+    return result.get("image_path")
 
 
 def _log_action(actions_log, entry):
@@ -793,7 +971,7 @@ def _bootstrap(client, run_dir, calibration, vision_delay=0.0):
     return True, observation
 
 
-def _measure_baseline(client, actions_log, calibration, scale_factor):
+def _measure_baseline(client, actions_log, calibration, scale_factor, canvas_path, variant=0):
     _click_canvas_relative(client, calibration, 0.5, 0.5, scale_factor=scale_factor)
     _log_action(actions_log, {"tool": "mouse_click", "region_name": "canvas", "target": "focus"})
     time.sleep(0.1)
@@ -804,9 +982,20 @@ def _measure_baseline(client, actions_log, calibration, scale_factor):
 
     client.call_tool("key_press", {"keys": ["i"]})
     _log_action(actions_log, {"tool": "key_press", "keys": ["i"]})
+    time.sleep(0.2)
 
-    pre = client.call_tool("capture_screen", {"region_name": "measure_panel"})
-    _log_action(actions_log, {"tool": "capture_screen", "region_name": "measure_panel", "result": pre})
+    # Quick local check: ensure the measure panel is actually open.
+    panel_check = client.call_tool("capture_screen", {"region_name": "measure_panel"})
+    _log_action(actions_log, {"tool": "capture_screen", "region_name": "measure_panel_check", "result": panel_check})
+    if not _looks_like_measure_panel(panel_check.get("image_path")):
+        client.call_tool("key_press", {"keys": ["i"]})
+        _log_action(actions_log, {"tool": "key_press", "keys": ["i"], "target": "retry_open_measure"})
+        time.sleep(0.2)
+        panel_check = client.call_tool("capture_screen", {"region_name": "measure_panel"})
+        _log_action(
+            actions_log,
+            {"tool": "capture_screen", "region_name": "measure_panel_check", "result": panel_check},
+        )
 
     # Best-effort: enable snap points + vertex filter for point-to-point measurement.
     _click_region_relative(client, calibration, "measure_panel", 0.14, 0.30, scale_factor=scale_factor)
@@ -819,12 +1008,112 @@ def _measure_baseline(client, actions_log, calibration, scale_factor):
     _log_action(actions_log, {"tool": "mouse_click", "region_name": "measure_panel", "target": "show_snap_points"})
     time.sleep(0.35)
 
-    # Click left/right pegs (more reliable visual targets) to force a distance measurement.
-    _click_canvas_relative(client, calibration, 0.30, 0.42, scale_factor=scale_factor)
-    _log_action(actions_log, {"tool": "mouse_click", "region_name": "canvas", "target": "left_peg"})
+    row_target = _find_dark_row_targets(canvas_path) if canvas_path else None
+    bbox = _compute_silhouette_bbox(canvas_path) if canvas_path else None
+    margin = 20 if variant == 0 else 30
+    y_ratio = 0.5 if variant == 0 else 0.4
+    bbox_reason = "ok"
+    if bbox:
+        if (bbox["right"] - bbox["left"]) > bbox["width"] * 0.95:
+            bbox = None
+            bbox_reason = "full_width"
+        elif (bbox["bottom"] - bbox["top"]) > bbox["height"] * 0.95:
+            bbox = None
+            bbox_reason = "full_height"
+    else:
+        bbox_reason = "none"
+
+    canvas_w = None
+    canvas_h = None
+    if canvas_path and not bbox:
+        try:
+            from PIL import Image
+
+            with Image.open(canvas_path) as img:
+                canvas_w, canvas_h = img.size
+        except Exception:
+            canvas_w = None
+            canvas_h = None
+
+    if row_target:
+        row_margin = 5
+        left_x = max(row_target["left"] + row_margin, 0)
+        right_x = max(row_target["right"] - row_margin, left_x + 1)
+        click_y = row_target["y"]
+        bbox_reason = "row_scan_dark_pixels"
+    elif bbox:
+        left_x = max(bbox["left"] + margin, 0)
+        right_x = min(bbox["right"] - margin, bbox["width"])
+        click_y = int(bbox["top"] + (bbox["bottom"] - bbox["top"]) * y_ratio)
+    else:
+        if canvas_w and canvas_h:
+            left_x = int(canvas_w * 0.2)
+            right_x = int(canvas_w * 0.8)
+            click_y = int(canvas_h * (0.6 if variant == 0 else 0.45))
+        else:
+            left_x = 200
+            right_x = 800
+            click_y = 420
+
+    canvas = _get_region(calibration, "canvas")
+    panel = _get_region(calibration, "measure_panel")
+    abs_left_x = canvas["x"] + left_x * scale_factor
+    abs_right_x = canvas["x"] + right_x * scale_factor
+    abs_y = canvas["y"] + click_y * scale_factor
+    panel_avoid = False
+    if panel and _point_in_region(abs_left_x, abs_y, panel):
+        abs_y = _shift_y_below_panel(abs_y, panel, canvas)
+        panel_avoid = True
+    if panel and _point_in_region(abs_right_x, abs_y, panel):
+        abs_y = _shift_y_below_panel(abs_y, panel, canvas)
+        panel_avoid = True
+    _log_action(
+        actions_log,
+        {
+            "tool": "silhouette_targets",
+            "left": {"x": left_x, "y": click_y},
+            "right": {"x": right_x, "y": click_y},
+            "scale_factor": scale_factor,
+            "panel_avoid": panel_avoid,
+            "bbox_reason": bbox_reason,
+        },
+    )
+
+    client.call_tool("mouse_click", {"x": int(round(abs_left_x)), "y": int(round(abs_y))})
+    _log_action(
+        actions_log,
+        {
+            "tool": "mouse_click",
+            "region_name": "canvas",
+            "target": "left_silhouette",
+            "applied": {"x": int(round(abs_left_x)), "y": int(round(abs_y))},
+            "scale_factor": scale_factor,
+        },
+    )
+    left_crop = None
+    if variant > 0:
+        left_crop = _capture_click_crop(client, actions_log, abs_left_x, abs_y, "left")
     time.sleep(0.15)
-    _click_canvas_relative(client, calibration, 0.78, 0.52, scale_factor=scale_factor)
-    _log_action(actions_log, {"tool": "mouse_click", "region_name": "canvas", "target": "right_peg"})
+    client.call_tool("mouse_click", {"x": int(round(abs_right_x)), "y": int(round(abs_y))})
+    _log_action(
+        actions_log,
+        {
+            "tool": "mouse_click",
+            "region_name": "canvas",
+            "target": "right_silhouette",
+            "applied": {"x": int(round(abs_right_x)), "y": int(round(abs_y))},
+            "scale_factor": scale_factor,
+        },
+    )
+    right_crop = None
+    if variant > 0:
+        right_crop = _capture_click_crop(client, actions_log, abs_right_x, abs_y, "right")
+
+    post = client.call_tool("capture_screen", {"region_name": "measure_panel"})
+    _log_action(actions_log, {"tool": "capture_screen", "region_name": "measure_panel", "result": post})
+
+    click_distance = abs(right_x - left_x)
+    return [post.get("image_path")], [left_crop, right_crop], click_distance
 
     post = client.call_tool("capture_screen", {"region_name": "measure_panel"})
     _log_action(actions_log, {"tool": "capture_screen", "region_name": "measure_panel", "result": post})
@@ -857,6 +1146,7 @@ def run_loop(client, run_dir, max_steps, force_measure=False, vision_delay=0.0, 
     actions_log = os.path.join(run_dir, "actions.jsonl")
     obs_dir = os.path.join(run_dir, "observations")
     _ensure_dir(obs_dir)
+    debug_post_click = False
 
     planner = Planner()
     ok, bootstrap_obs = _bootstrap(client, run_dir, calibration, vision_delay=vision_delay)
@@ -868,20 +1158,56 @@ def run_loop(client, run_dir, max_steps, force_measure=False, vision_delay=0.0, 
         planner.state = "MEASURE_BASELINE"
 
     for step in range(max_steps):
+        skip_vision = False
         try:
             screen_info = client.call_tool("get_screen_info", {})
             _log_action(actions_log, {"tool": "get_screen_info", "result": screen_info})
         except Exception:
             screen_info = {}
 
+        capture_map = {}
+        scale_factor = planner.last_scale_factor or 1.0
+        observation = last_observation
         if planner.state == "MEASURE_BASELINE" and not planner.baseline_measured and not planner.awaiting_measurement:
-            if not planner.action_queue:
-                planner.action_queue = [
-                    {"intent": "fit_view"},
-                    {"intent": "set_view_front"},
-                    {"intent": "zoom_out", "steps": 2},
-                    {"intent": "measure_baseline"},
-                ]
+            if not planner.nav_done:
+                # NAV phase: fast, no vision. Capture canvas pre/post, run nav batch.
+                if "canvas" in calibration:
+                    pre_canvas = client.call_tool("capture_screen", {"region_name": "canvas"})
+                    _log_action(actions_log, {"tool": "capture_screen", "region_name": "canvas", "result": pre_canvas})
+                    capture_map["canvas"] = pre_canvas
+
+                _click_canvas_relative(client, calibration, 0.5, 0.5, scale_factor=scale_factor)
+                _log_action(actions_log, {"tool": "mouse_click", "region_name": "canvas", "target": "focus"})
+                client.call_tool("key_press", {"keys": ["f6"]})
+                _log_action(actions_log, {"tool": "key_press", "keys": ["f6"]})
+                client.call_tool("wait", {"milliseconds": 350})
+                _log_action(actions_log, {"tool": "wait", "arguments": {"milliseconds": 350}})
+                client.call_tool("key_press", {"keys": ["command", "6"]})
+                _log_action(actions_log, {"tool": "key_press", "keys": ["command", "6"]})
+                client.call_tool("wait", {"milliseconds": 350})
+                _log_action(actions_log, {"tool": "wait", "arguments": {"milliseconds": 350}})
+                client.call_tool("mouse_scroll", {"delta_y": -120, "steps": 6})
+                _log_action(actions_log, {"tool": "mouse_scroll", "arguments": {"delta_y": -120, "steps": 6}})
+                nav_canvas = client.call_tool("capture_screen", {"region_name": "canvas"})
+                _log_action(actions_log, {"tool": "capture_screen", "region_name": "canvas", "result": nav_canvas})
+                capture_map["canvas"] = nav_canvas
+                if screen_info:
+                    scale_factor, ratio = _update_scale_from_capture(screen_info, nav_canvas)
+                    planner.last_scale_factor = scale_factor
+                    _log_action(
+                        actions_log,
+                        {
+                            "tool": "scale_check",
+                            "display": {"width": screen_info.get("width"), "height": screen_info.get("height")},
+                            "capture": {"width": nav_canvas.get("width"), "height": nav_canvas.get("height")},
+                            "ratio": ratio,
+                            "scale_factor": scale_factor,
+                        },
+                    )
+                planner.last_canvas_path = nav_canvas.get("image_path")
+                planner.nav_done = True
+                continue
+            skip_vision = True
 
         if planner.awaiting_measurement:
             capture_regions = ["measure_panel"]
@@ -890,19 +1216,21 @@ def run_loop(client, run_dir, max_steps, force_measure=False, vision_delay=0.0, 
             capture_regions = _capture_plan(last_observation, planner.state, calibration, force_measure=force_measure)
             focus = None
         captures = []
-        capture_map = {}
-        for region_name in capture_regions:
-            result = client.call_tool("capture_screen", {"region_name": region_name})
-            _log_action(actions_log, {"tool": "capture_screen", "region_name": region_name, "result": result})
-            captures.append(result)
-            capture_map[region_name] = result
+        if not skip_vision:
+            for region_name in capture_regions:
+                result = client.call_tool("capture_screen", {"region_name": region_name})
+                _log_action(actions_log, {"tool": "capture_screen", "region_name": region_name, "result": result})
+                captures.append(result)
+                capture_map[region_name] = result
 
         if captures and screen_info:
             scale_factor, ratio = _update_scale_from_capture(screen_info, captures[0])
         else:
-            scale_factor = 1.0
+            scale_factor = planner.last_scale_factor or 1.0
 
         image_paths = [item.get("image_path") for item in captures if item.get("image_path")]
+        if debug_post_click and planner.awaiting_measurement and planner.last_post_click_crops:
+            image_paths.extend(planner.last_post_click_crops)
 
         if captures and screen_info:
             _log_action(
@@ -916,39 +1244,42 @@ def run_loop(client, run_dir, max_steps, force_measure=False, vision_delay=0.0, 
                 },
             )
 
-        try:
-            raw_path = os.path.join(obs_dir, f"vision_raw-{step+1:03d}.txt")
-            observation = vision_client(
-                image_paths,
-                "Modify back plate to fit Raspberry Pi 3B",
-                initial_delay=vision_delay,
-                raw_log_path=raw_path,
-                focus=focus,
-            )
+        if skip_vision:
+            action = {"intent": "measure_baseline"}
+        else:
             try:
-                _basic_validate_observation(observation)
-            except Exception as exc:
-                observation = _safe_observation_on_invalid(observation, exc)
-        except Exception as exc:
-            observation = _error_observation("Modify back plate to fit Raspberry Pi 3B", image_paths, exc)
-
-        viewcube_path = capture_map.get("viewcube", {}).get("image_path")
-        if viewcube_path:
-            try:
-                viewcube_raw = os.path.join(obs_dir, f"vision_viewcube-{step+1:03d}.txt")
-                viewcube_obs = vision_client(
-                    [viewcube_path],
-                    "Extract viewcube only",
+                raw_path = os.path.join(obs_dir, f"vision_raw-{step+1:03d}.txt")
+                observation = vision_client(
+                    image_paths,
+                    "Modify back plate to fit Raspberry Pi 3B",
                     initial_delay=vision_delay,
-                    raw_log_path=viewcube_raw,
-                    focus="viewcube",
+                    raw_log_path=raw_path,
+                    focus=focus,
                 )
-                observation["extraction"]["viewcube"] = viewcube_obs.get("extraction", {}).get(
-                    "viewcube",
-                    observation.get("extraction", {}).get("viewcube", {"visible": False, "face": "Unknown", "targets": []}),
-                )
-            except Exception:
-                pass
+                try:
+                    _basic_validate_observation(observation)
+                except Exception as exc:
+                    observation = _safe_observation_on_invalid(observation, exc)
+            except Exception as exc:
+                observation = _error_observation("Modify back plate to fit Raspberry Pi 3B", image_paths, exc)
+
+            viewcube_path = capture_map.get("viewcube", {}).get("image_path")
+            if viewcube_path:
+                try:
+                    viewcube_raw = os.path.join(obs_dir, f"vision_viewcube-{step+1:03d}.txt")
+                    viewcube_obs = vision_client(
+                        [viewcube_path],
+                        "Extract viewcube only",
+                        initial_delay=vision_delay,
+                        raw_log_path=viewcube_raw,
+                        focus="viewcube",
+                    )
+                    observation["extraction"]["viewcube"] = viewcube_obs.get("extraction", {}).get(
+                        "viewcube",
+                        observation.get("extraction", {}).get("viewcube", {"visible": False, "face": "Unknown", "targets": []}),
+                    )
+                except Exception:
+                    pass
 
         entries = observation.get("extraction", {}).get("measurements", {}).get("entries", [])
         if entries:
@@ -958,33 +1289,36 @@ def run_loop(client, run_dir, max_steps, force_measure=False, vision_delay=0.0, 
                 f"({best.get('metric')}, confidence {best.get('confidence')})"
             )
 
-        if captures and screen_info:
-            scale_factor, ratio = _update_scale_from_capture(screen_info, captures[0])
-            _log_action(
-                actions_log,
-                {
-                    "tool": "scale_check",
-                    "display": {"width": screen_info.get("width"), "height": screen_info.get("height")},
-                    "capture": {"width": captures[0].get("width"), "height": captures[0].get("height")},
-                    "ratio": ratio,
-                    "scale_factor": scale_factor,
-                },
-            )
-        else:
-            scale_factor = 1.0
-        obs_path = os.path.join(obs_dir, f"observation-{step+1:03d}.json")
-        with open(obs_path, "w", encoding="utf-8") as fh:
-            json.dump(observation, fh, indent=2)
+        if not skip_vision:
+            if captures and screen_info:
+                scale_factor, ratio = _update_scale_from_capture(screen_info, captures[0])
+                _log_action(
+                    actions_log,
+                    {
+                        "tool": "scale_check",
+                        "display": {"width": screen_info.get("width"), "height": screen_info.get("height")},
+                        "capture": {"width": captures[0].get("width"), "height": captures[0].get("height")},
+                        "ratio": ratio,
+                        "scale_factor": scale_factor,
+                    },
+                )
+            else:
+                scale_factor = planner.last_scale_factor or 1.0
+            obs_path = os.path.join(obs_dir, f"observation-{step+1:03d}.json")
+            with open(obs_path, "w", encoding="utf-8") as fh:
+                json.dump(observation, fh, indent=2)
 
         last_observation = observation
-        planner.update_progress(observation["task_state"]["progress"])
+        if not skip_vision:
+            planner.update_progress(observation["task_state"]["progress"])
         if planner.stuck_count >= 8:
             planner.state = "RECOVER"
 
-        if planner.state == "RECOVER":
-            action = {"tool": "wait", "arguments": {"milliseconds": 500}, "intent": "recover"}
-        else:
-            action = planner.decide_action(observation)
+        if not skip_vision:
+            if planner.state == "RECOVER":
+                action = {"tool": "wait", "arguments": {"milliseconds": 500}, "intent": "recover"}
+            else:
+                action = planner.decide_action(observation)
 
         if action is None:
             break
@@ -992,17 +1326,23 @@ def run_loop(client, run_dir, max_steps, force_measure=False, vision_delay=0.0, 
         if planner.awaiting_measurement:
             entries = observation.get("extraction", {}).get("measurements", {}).get("entries", [])
             best = max(entries, key=lambda e: e.get("confidence", 0.0), default=None)
-            if best and best.get("confidence", 0.0) >= 0.7 and float(best.get("value", 0.0)) >= 10.0:
+            if (
+                best
+                and best.get("confidence", 0.0) >= 0.7
+                and float(best.get("value", 0.0)) >= 10.0
+                and (planner.last_click_distance is None or planner.last_click_distance >= 50)
+            ):
                 planner.baseline_measured = True
                 planner.awaiting_measurement = False
                 planner.state = "VERIFY"
             else:
                 planner.awaiting_measurement = False
                 planner.measurement_attempts += 1
-                if best and float(best.get("value", 0.0)) < 10.0 and planner.measurement_attempts <= 1:
+                if planner.measurement_attempts <= 1:
+                    planner.measure_variant = 1
                     planner.action_queue = [
                         {"intent": "fit_view"},
-                        {"intent": "zoom_out", "steps": 2},
+                        {"intent": "zoom_in", "steps": 2},
                         {"intent": "measure_baseline"},
                     ]
                 else:
@@ -1070,15 +1410,25 @@ def run_loop(client, run_dir, max_steps, force_measure=False, vision_delay=0.0, 
             continue
 
         if action.get("intent") == "measure_baseline":
-            measure_paths = _measure_baseline(client, actions_log, calibration, scale_factor)
+            canvas_path = capture_map.get("canvas", {}).get("image_path") or planner.last_canvas_path
+            measure_paths, crop_paths, click_distance = _measure_baseline(
+                client,
+                actions_log,
+                calibration,
+                scale_factor or planner.last_scale_factor or 1.0,
+                canvas_path,
+                variant=planner.measure_variant,
+            )
             planner.awaiting_measurement = True
+            planner.last_click_distance = click_distance
+            planner.last_post_click_crops = [p for p in crop_paths if p]
             # Run a focused measurement pass immediately on the post-measure capture.
             measure_paths = [p for p in measure_paths if p]
             if measure_paths:
                 try:
                     raw_path = os.path.join(obs_dir, f"vision_raw-measure-{step+1:03d}.txt")
                     observation = vision_client(
-                        measure_paths[-1:],
+                        measure_paths[-1:] + (planner.last_post_click_crops if debug_post_click else []),
                         "Extract baseline measurement",
                         initial_delay=vision_delay,
                         raw_log_path=raw_path,
