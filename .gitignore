@@ -6,6 +6,7 @@ full-desktop-screenshot.png
 
 # Logs/artifacts
 logs/
+error.log
 
 # OS junk
 .DS_Store

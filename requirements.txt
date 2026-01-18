@@ -1,3 +1,3 @@
 pyautogui
 pillow
-pyobjc
+pyobjc; platform_system == "Darwin"
