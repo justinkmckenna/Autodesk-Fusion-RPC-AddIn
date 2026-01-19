@@ -8,6 +8,9 @@ UI/vision clicking is brittle for vertex-level selection. General navigation wor
 Architecture:
 Agent/CLI <-> localhost TCP <-> Fusion RPC Add-In <-> Fusion API (main thread)
 
+### Legacy note (UI/Vision MCP is deprecated)
+The original MCP-based UI/vision automation (`mcp_server.py`, `agent_runner.py`) is now **legacy/deprecated** for geometry operations. Keep it only as optional/experimental tooling for future **visual verification** (e.g., “does this look right?” checks), not for deterministic selection, measurement, or edits.
+
 ### Setup and Install (Fusion RPC Add-In)
 Fusion add-ins must live in Fusion’s AddIns folder. Copy or symlink the add-in folder from this repo:
 
@@ -16,6 +19,14 @@ Fusion add-ins must live in Fusion’s AddIns folder. Copy or symlink the add-in
 
 From this repo, copy:
 `fusion_rpc_addin/FusionRPCAddIn` -> Fusion AddIns folder
+
+Recommended (keeps hot-reload in sync with this repo):
+```bash
+ln -sfn "$(pwd)/fusion_rpc_addin/FusionRPCAddIn/FusionRPCAddIn.py" \
+  "~/Library/Application Support/Autodesk/Autodesk Fusion 360/API/AddIns/FusionRPCAddIn/FusionRPCAddIn.py"
+ln -sfn "$(pwd)/fusion_rpc_addin/FusionRPCAddIn/commands" \
+  "~/Library/Application Support/Autodesk/Autodesk Fusion 360/API/AddIns/FusionRPCAddIn/commands"
+```
 
 ### Run the Add-In
 1) Fusion -> Utilities -> Add-Ins -> Scripts and Add-Ins
@@ -49,13 +60,15 @@ python3 scripts/fusion_rpc_client.py my_command --param foo=123 --param bar=true
 - Add-in logs are written to a temp file; the path is shown on startup.
 
 ## Files
-- `mcp_server.py`: MCP server exposing screen + input tools.
-- `agent_runner.py`: Minimal agent runner (simple mode + planner loop stub).
+- `fusion_rpc_addin/FusionRPCAddIn/`: Fusion RPC add-in (authoritative execution engine).
+- `scripts/fusion_rpc_client.py`: CLI for sending RPC commands.
+- `mcp_server.py`: **Legacy/deprecated** MCP server exposing screen + input tools (not used for deterministic geometry ops).
+- `agent_runner.py`: **Legacy/deprecated** agent scaffold for UI/vision automation experiments.
 - `calibration.json`: Example region presets.
 - `logs/`: Captures, snapshots, and observations (created at runtime).
 
 ## macOS Permissions
-The MCP process must be granted:
+Only needed for the **legacy MCP UI/vision tooling**:
 - **Screen Recording** permission to capture screenshots.
 - **Accessibility** permission to send mouse/keyboard events.
 
@@ -67,27 +80,21 @@ Grant permissions in **System Settings → Privacy & Security → Screen Recordi
 python3 -m pip install -r requirements.txt
 ```
 
-2) Run the minimal demo (ESC ESC → capture timeline/canvas → print stub observation):
+2) Run the Fusion RPC add-in and smoke test from Terminal:
+```bash
+python3 scripts/fusion_rpc_client.py ping
+python3 scripts/fusion_rpc_client.py list_bodies
+python3 scripts/fusion_rpc_client.py measure_bbox
+```
+
+3) (Legacy/deprecated) Run the UI/vision demo scaffolding:
 ```bash
 python3 agent_runner.py
 ```
 
-3) Run the planner loop stub:
-```bash
-python3 agent_runner.py --loop --max-steps 8
-```
-
-4) Force measure panel capture during the loop (for testing):
-```bash
-python3 agent_runner.py --loop --max-steps 8 --force-measure
-```
-
-5) Add delay before each vision request (reduce 429s):
-```bash
-python3 agent_runner.py --loop --max-steps 8 --vision-delay-ms 4000
-```
-
 ## Running MCP in a Separate Terminal
+This section is **legacy/deprecated** and is kept only for optional/experimental UI/vision workflows.
+
 If macOS Accessibility permissions are blocking VS Code-hosted processes, run the MCP server from a trusted terminal and connect to it from the agent runner:
 
 1) Start the MCP server in a terminal that has Accessibility + Screen Recording permissions:
@@ -105,4 +112,3 @@ python3 agent_runner.py --connect 127.0.0.1:8765
 - `get_screen_info` is available for Retina scale detection to avoid click offsets.
 - Vision model integration uses the built-in vision client. Set `FUSION_VISION_API_KEY` and optional `FUSION_VISION_MODEL`/`FUSION_VISION_ENDPOINT` (OpenAI-compatible).
 - You can also set these values in a `.env` file in the project root (or set `FUSION_ENV_PATH` to point elsewhere).
-- For measurement steps, turn **off** the background grid in Fusion and set selection filters to **Body Vertices** so clicks snap to corners.
