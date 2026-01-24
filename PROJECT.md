@@ -104,7 +104,7 @@ Definition of Done:
 - A single pixel coordinate on a captured view reliably maps back to the same entity
 - A “round trip” debug mode can overlay picks onto the exported image
 
-Status: ⏳ not started
+Status: 🔄 in progress
 
 ---
 
@@ -162,3 +162,4 @@ Milestone alignment:
 - 2026-01-19: Documented pivot + roadmap; next milestone set to face-based measurement (`measure_face_span`).
 - 2026-01-19: Implemented `measure_face_span` with `require_planar=false` default; selectors include `max_bbox_x`, `largest_area`, and `normal_closest:*`; added `span_mode=projected_extent` for mesh-derived solids. Note: negative test for `eps_mm` could not be forced due to model limitations (bottom edges match min-Z), so error-path verification is deferred.
 - 2026-01-24: Implemented Milestone 1 `status` + `get_body_info` for root-component visible solids only; `get_body_info` supports `include_hidden` and returns identity transform plus bbox/counts/physical summaries (mm).
+- 2026-01-24: Implemented Milestone 3 view capture + camera controls (`get_camera`, `set_camera`, `capture_view`, `project_point`) with shared camera schema normalization and deterministic capture paths. Ray picking removed pending re-implementation.
