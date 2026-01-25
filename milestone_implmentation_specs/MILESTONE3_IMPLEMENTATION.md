@@ -120,7 +120,7 @@ Response:
 ### Command: `ray_pick`
 Purpose: Map a pixel coordinate to a scene entity.
 
-Note (2026-01-24): The initial ray-pick implementation was removed and will be re-implemented from scratch.
+Note (2026-01-24): The initial ray-pick implementation was removed and later re-implemented; see `PROJECT.md` progress log for the latest status.
 
 Request:
 - `x_px`, `y_px`

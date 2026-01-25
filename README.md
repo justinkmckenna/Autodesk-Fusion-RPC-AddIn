@@ -1,4 +1,4 @@
-# Fusion RPC Add-In (macOS)
+# Fusion RPC Add-In
 
 ## Pivot: From Vision/UI Automation to Fusion API RPC
 UI/vision clicking is brittle for vertex-level selection. General navigation worked, but precise measurement and edit workflows based on vision clicks were unreliable. We pivoted to a native RPC add-in that runs inside Fusion, exposes geometry via the Fusion API, and can load new command modules at runtime (no manual add-in reloads required after initial setup).
@@ -53,6 +53,12 @@ The add-in discovers command modules from `FusionRPCAddIn/commands/` (one file p
 ```bash
 python3 scripts/fusion_rpc_client.py help
 python3 scripts/fusion_rpc_client.py reload_commands
+```
+
+### Utility Commands
+Create a parameter-driven box for repeatable measurement and verification:
+```bash
+python3 scripts/fusion_rpc_client.py create_param_box --param width_mm=20 --param depth_mm=20 --param height_param=Height --param height_expression="20 mm" --param body_name=Body2
 ```
 
 To pass custom parameters to new commands:

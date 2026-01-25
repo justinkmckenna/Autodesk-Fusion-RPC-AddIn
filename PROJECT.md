@@ -50,7 +50,7 @@ Status: ✅ complete
 
 ---
 
-### Milestone 1 — Health + introspection (NEXT after face measurement if needed)
+### Milestone 1 — Health + introspection
 Goal: early failure detection and richer geometry inventory for deterministic targeting.
 
 Deliverables:
@@ -65,7 +65,7 @@ Status: ✅ complete
 
 ---
 
-### Milestone 2 — Face-based measurement (ACTIVE milestone)
+### Milestone 2 — Face-based measurement
 Goal: replace the original “Step 8 UI measurement” with an API-only, face-targeted measurement.
 
 Primary deliverable:
