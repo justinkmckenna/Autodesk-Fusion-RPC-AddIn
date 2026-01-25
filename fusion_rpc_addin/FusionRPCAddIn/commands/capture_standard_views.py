@@ -1,7 +1,6 @@
 import importlib
 import os
 import sys
-import math
 import time
 
 import adsk.core
@@ -90,6 +89,30 @@ def _capture(viewport, units_mgr, convert_mm, view_name, width_px, height_px, ca
     return {"image_path": image_path, "camera": camera_data}, None
 
 
+def _capture_home(viewport, units_mgr, convert_mm, view_name, width_px, height_px):
+    try:
+        viewport.goHome()
+    except Exception:
+        return None, "Failed to set home view"
+
+    time.sleep(0.05)
+    try:
+        camera = viewport.camera
+    except Exception:
+        return None, "Failed to access viewport camera"
+
+    image_path = _capture_path(view_name, width_px, height_px)
+    try:
+        success = viewport.saveAsImageFile(image_path, width_px, height_px)
+    except Exception:
+        success = False
+    if not success:
+        return None, "Viewport image capture failed"
+
+    camera_data = view_helpers._normalize_camera(camera, units_mgr, convert_mm, viewport=viewport)
+    return {"image_path": image_path, "camera": camera_data}, None
+
+
 def handle(request, context):
     app = context["app"]
     root_comp = context["root_comp"]
@@ -100,8 +123,6 @@ def handle(request, context):
     width_px = int(request.get("width_px", 1200))
     height_px = int(request.get("height_px", 800))
     padding = _safe_float(request.get("padding", 1.15), 1.15)
-    fov_deg = _safe_float(request.get("fov_deg", 35.0), 35.0)
-    iso_mode = str(request.get("iso_mode", "orthographic")).lower()
     views = request.get("views") or ["top", "front", "right", "isometric"]
 
     if width_px <= 0 or height_px <= 0:
@@ -143,12 +164,6 @@ def handle(request, context):
     front_size = max(size_x, size_z) * padding
     right_size = max(size_y, size_z) * padding
 
-    diag = (size_x ** 2 + size_y ** 2 + size_z ** 2) ** 0.5
-    radius = 0.5 * diag * padding
-    fov_rad = max(fov_deg, 1.0) * math.pi / 180.0
-    distance = radius / max(0.1, math.sin(fov_rad * 0.5))
-    iso_size = max(size_x, size_y, size_z) * padding * 1.25
-
     try:
         viewport = app.activeViewport
     except Exception:
@@ -165,27 +180,17 @@ def handle(request, context):
         if view_key == "top":
             payload = _camera_payload(center, (0.0, 0.0, 1.0), (0.0, 1.0, 0.0), "orthographic", size_mm=top_size)
         elif view_key == "front":
-            payload = _camera_payload(center, (0.0, 1.0, 0.0), (0.0, 0.0, 1.0), "orthographic", size_mm=front_size)
+            # Front should look toward -Y so the min-Y face is visible.
+            payload = _camera_payload(center, (0.0, -1.0, 0.0), (0.0, 0.0, 1.0), "orthographic", size_mm=front_size)
         elif view_key == "right":
             payload = _camera_payload(center, (1.0, 0.0, 0.0), (0.0, 0.0, 1.0), "orthographic", size_mm=right_size)
         elif view_key in ("iso", "isometric", "home"):
-            if iso_mode == "perspective":
-                payload = _camera_payload(
-                    center,
-                    (1.0, 1.0, 1.0),
-                    (0.0, 0.0, 1.0),
-                    "perspective",
-                    fov_deg=fov_deg,
-                    distance_mm=distance,
-                )
+            data, error = _capture_home(viewport, units_mgr, convert_mm, view_key, width_px, height_px)
+            if error:
+                errors[view_key] = error
             else:
-                payload = _camera_payload(
-                    center,
-                    (1.0, 1.0, 1.0),
-                    (0.0, 0.0, 1.0),
-                    "orthographic",
-                    size_mm=iso_size,
-                )
+                results[view_key] = data
+            continue
         else:
             errors[view_key] = "Unsupported view"
             continue

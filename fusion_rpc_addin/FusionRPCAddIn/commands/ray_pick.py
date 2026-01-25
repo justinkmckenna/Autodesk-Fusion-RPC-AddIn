@@ -189,16 +189,24 @@ def handle(request, context):
         if entity_type is None:
             continue
         entity_id = view_helpers._entity_id(entity)
+        try:
+            entity_token = getattr(entity, "entityToken")
+        except Exception:
+            entity_token = None
+        try:
+            entity_temp_id = getattr(entity, "tempId")
+        except Exception:
+            entity_temp_id = None
         distance_mm = _distance_mm(units_mgr, convert_mm, origin, hit_point)
         if distance_mm is None:
             continue
-        scored_hits.append((distance_mm, entity_id or "", entity, hit_point, entity_type))
+        scored_hits.append((distance_mm, entity_id or "", entity, hit_point, entity_type, entity_token, entity_temp_id))
 
     if not scored_hits:
         return {"ok": False, "error": "No hit"}
 
     scored_hits.sort(key=lambda item: (item[0], item[1]))
-    distance_mm, entity_id, entity, hit_point, entity_type = scored_hits[0]
+    distance_mm, entity_id, entity, hit_point, entity_type, entity_token, entity_temp_id = scored_hits[0]
 
     hit_mm = view_helpers._point_mm(convert_mm, units_mgr, hit_point)
     normal = _normal_for_hit(entity, hit_point, units_mgr, convert_mm)
@@ -212,6 +220,8 @@ def handle(request, context):
             "entity": {
                 "type": entity_type,
                 "id": entity_id,
+                "token": entity_token,
+                "temp_id": entity_temp_id,
                 "body_name": body_name,
             },
             "hit_mm": hit_mm,

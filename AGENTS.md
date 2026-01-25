@@ -19,8 +19,8 @@
 - Keep RPC outputs structured and explicit (include `ok`, `error`, and identifiers).
 
 ## Testing Guidelines
-- There is no dedicated test framework in this repo yet.
 - Use the CLI commands above for smoke testing; keep results deterministic across runs.
+- Try a simple revert to reset if you've made a mistake before giving up and deleting all bodies and all sketches and rebuilding.
 - When rebuilding from drawings (e.g., `draft.png`), agents must also perform **visual verification** by capturing the standard orthographic and isometric views and comparing them to the draft.
   - Command: `python3 scripts/fusion_rpc_client.py capture_standard_views --param body_name=Body1 --param width_px=1200 --param height_px=900`
   - Compare captures in `logs/captures/` against `draft.png` (top/front/right/isometric).

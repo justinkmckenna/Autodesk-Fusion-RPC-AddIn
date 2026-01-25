@@ -72,6 +72,18 @@ def _find_face_by_id(root_comp, face_id):
     return None, None
 
 
+def _find_face_by_token(root_comp, face_token):
+    for body in selection_helpers._list_visible_bodies(root_comp):
+        for face in body.faces:
+            try:
+                token = getattr(face, "entityToken")
+            except Exception:
+                token = None
+            if token == face_token:
+                return face, body
+    return None, None
+
+
 def handle(request, context):
     design = context.get("design")
     root_comp = context.get("root_comp")
@@ -84,14 +96,15 @@ def handle(request, context):
     body_name = request.get("body_name")
     face_selector = request.get("face_selector")
     face_id = request.get("face_id")
+    face_token = request.get("face_token")
     center_mm = request.get("center_mm")
     diameter_mm = request.get("diameter_mm")
     depth_mm = request.get("depth_mm")
     through_all = bool(request.get("through_all", False))
     preview = bool(request.get("preview", False))
 
-    if not face_id and not face_selector:
-        return {"ok": False, "error": "face_selector or face_id is required"}
+    if not face_id and not face_token and not face_selector:
+        return {"ok": False, "error": "face_selector, face_id, or face_token is required"}
 
     if not isinstance(center_mm, dict):
         return {"ok": False, "error": "center_mm must be an object with x,y,z"}
@@ -122,7 +135,11 @@ def handle(request, context):
     face = None
     body = None
     candidates = []
-    if face_id:
+    if face_token:
+        face, body = _find_face_by_token(root_comp, face_token)
+        if not face:
+            return {"ok": False, "error": f"face_token not found: {face_token}"}
+    elif face_id:
         face, body = _find_face_by_id(root_comp, face_id)
         if not face:
             return {"ok": False, "error": f"face_id not found: {face_id}"}
@@ -155,6 +172,7 @@ def handle(request, context):
         "body_name": getattr(body, "name", None),
         "face": {
             "id": selection_helpers._entity_id(face),
+            "token": getattr(face, "entityToken", None),
             "selector": face_selector,
         },
         "center_mm": center,
