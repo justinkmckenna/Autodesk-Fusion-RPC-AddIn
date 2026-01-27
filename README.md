@@ -32,7 +32,7 @@ python3 fusion_rpc_client.py run_python --code "print('hello'); result = 123" --
 ```
 
 ## Context7 MCP Recommendation
-Use the Context7 MCP server when working with this add-in to quickly look up Fusion 360 API classes and usage without relying on ad-hoc web searches.
+Use the Context7 MCP server when working with this add-in so the agent can quickly look up Fusion 360 API classes and usage without relying on ad-hoc web searches.
 
 Recommended libraries:
 - `/autodeskfusion360/autodeskfusion360.github.io` — primary index for Fusion 360 API surface.
