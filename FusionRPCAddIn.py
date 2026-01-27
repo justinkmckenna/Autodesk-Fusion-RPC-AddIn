@@ -1,13 +1,13 @@
+import contextlib
+import io
 import json
 import os
 import queue
 import socket
-import sys
 import tempfile
 import threading
 import time
 import traceback
-import importlib.util
 
 _EARLY_LOG_PATH = None
 
@@ -49,11 +49,6 @@ _request_queue = queue.Queue()
 _handlers = []
 _log_path = None
 _log_dir = None
-_command_registry = {}
-_command_modules = []
-_commands_loaded = False
-
-
 def _log(message):
     if not _log_path:
         _write_early_log(message)
@@ -90,75 +85,6 @@ def _convert_mm(units_mgr, value):
     except Exception:
         # Internal units are cm; fallback conversion.
         return value * 10.0
-
-
-def _commands_dir():
-    return os.path.join(os.path.dirname(os.path.abspath(__file__)), "commands")
-
-
-def _load_command_modules():
-    registry = {}
-    modules = []
-    cmd_dir = _commands_dir()
-    if not os.path.isdir(cmd_dir):
-        _log(f"Commands directory missing: {cmd_dir}")
-        return registry, modules
-    for filename in os.listdir(cmd_dir):
-        if not filename.endswith(".py"):
-            continue
-        if filename.startswith("_") or filename == "__init__.py":
-            continue
-        cmd_name = filename[:-3]
-        module_name = f"fusion_rpc_cmds.{cmd_name}"
-        module_path = os.path.join(cmd_dir, filename)
-        try:
-            spec = importlib.util.spec_from_file_location(module_name, module_path)
-            if not spec or not spec.loader:
-                _log(f"Failed to load command module: {module_path}")
-                continue
-            module = importlib.util.module_from_spec(spec)
-            spec.loader.exec_module(module)
-        except Exception:
-            _log("Error loading command module:\n" + _format_exception())
-            continue
-        command = getattr(module, "COMMAND", None)
-        handler = getattr(module, "handle", None)
-        if not command or not callable(handler):
-            _log(f"Command module missing COMMAND/handle: {module_path}")
-            continue
-        requires_design = bool(getattr(module, "REQUIRES_DESIGN", False))
-        registry[command] = {
-            "handle": handler,
-            "requires_design": requires_design,
-            "module": module_name,
-        }
-        modules.append(module_name)
-    return registry, modules
-
-
-def _reload_commands():
-    global _command_registry, _command_modules, _commands_loaded
-    for module_name in list(_command_modules):
-        try:
-            if module_name in sys.modules:
-                del sys.modules[module_name]
-        except Exception:
-            pass
-    registry, modules = _load_command_modules()
-    _command_registry = registry
-    _command_modules = modules
-    _commands_loaded = True
-    return {"ok": True, "commands": sorted(_command_registry.keys())}
-
-
-def _ensure_commands_loaded():
-    global _commands_loaded
-    if _commands_loaded:
-        return
-    registry, modules = _load_command_modules()
-    _command_registry.update(registry)
-    _command_modules.extend(modules)
-    _commands_loaded = True
 
 
 class RpcEventHandler(adsk.core.CustomEventHandler):
@@ -249,31 +175,15 @@ def _handle_request(request):
     try:
         cmd = request.get("cmd")
         if cmd == "help":
-            _ensure_commands_loaded()
-            commands = sorted(_command_registry.keys())
-            commands.extend(["help", "reload_commands"])
-            response.update({"ok": True, "commands": sorted(set(commands))})
+            response.update({"ok": True, "commands": ["run_python"]})
             return response
-        if cmd == "reload_commands":
-            response.update(_reload_commands())
-            return response
-
-        _ensure_commands_loaded()
-        handler_entry = _command_registry.get(cmd)
-        if not handler_entry:
+        if cmd != "run_python":
             response.update({"ok": False, "error": f"Unknown command: {cmd}"})
             return response
 
         design = adsk.fusion.Design.cast(_app.activeProduct)
-        if handler_entry.get("requires_design"):
-            if not design:
-                response.update({"ok": False, "error": "No active Fusion design."})
-                return response
-            root_comp = design.rootComponent
-            units_mgr = design.unitsManager
-        else:
-            root_comp = None
-            units_mgr = None
+        root_comp = design.rootComponent if design else None
+        units_mgr = design.unitsManager if design else None
 
         context = {
             "app": _app,
@@ -285,14 +195,72 @@ def _handle_request(request):
             "find_body": _find_body,
             "convert_mm": _convert_mm,
         }
-        result = handler_entry["handle"](request, context)
-        if isinstance(result, dict):
-            response.update(result)
-        else:
-            response.update({"ok": True, "result": result})
+        response.update(_handle_run_python(request, context))
         return response
     except Exception:
         response.update({"ok": False, "error": _format_exception()})
+        return response
+
+
+def _safe_json_value(value):
+    try:
+        json.dumps(value)
+        return value
+    except Exception:
+        return repr(value)
+
+
+def _handle_run_python(request, context):
+    code = request.get("code")
+    if not code:
+        return {"ok": False, "error": "Missing code"}
+    inputs = request.get("inputs") or {}
+    if not isinstance(inputs, dict):
+        return {"ok": False, "error": "inputs must be a dict"}
+    capture_stdout = bool(request.get("capture_stdout", True))
+    result_var = request.get("result_var", "result")
+    label = request.get("label", "")
+
+    code_len = len(code)
+    snippet = code[:200].replace("\n", "\\n")
+    if label:
+        _log(f"run_python label={label} code_len={code_len} snippet={snippet}")
+    else:
+        _log(f"run_python code_len={code_len} snippet={snippet}")
+
+    exec_globals = {"adsk": adsk, "__builtins__": __builtins__}
+    exec_locals = dict(context)
+    exec_locals.update(inputs)
+
+    stdout_buf = io.StringIO() if capture_stdout else None
+    start = time.time()
+    try:
+        if capture_stdout:
+            with contextlib.redirect_stdout(stdout_buf), contextlib.redirect_stderr(stdout_buf):
+                exec(code, exec_globals, exec_locals)
+        else:
+            exec(code, exec_globals, exec_locals)
+        elapsed_ms = int((time.time() - start) * 1000)
+        result_value = exec_locals.get(result_var)
+        response = {
+            "ok": True,
+            "result": _safe_json_value(result_value),
+            "timing_ms": elapsed_ms,
+            "log_path": _log_path,
+        }
+        if capture_stdout:
+            response["stdout"] = stdout_buf.getvalue()
+        return response
+    except Exception:
+        elapsed_ms = int((time.time() - start) * 1000)
+        response = {
+            "ok": False,
+            "error": _format_exception(),
+            "timing_ms": elapsed_ms,
+            "log_path": _log_path,
+        }
+        if capture_stdout:
+            response["stdout"] = stdout_buf.getvalue()
         return response
 
 

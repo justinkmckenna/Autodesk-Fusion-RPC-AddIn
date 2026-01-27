@@ -4,21 +4,14 @@ Architecture:
 Agent/CLI <-> localhost TCP <-> Fusion RPC Add-In <-> Fusion API (main thread)
 
 ### Setup and Install (Fusion RPC Add-In)
-Fusion add-ins must live in Fusion’s AddIns folder. Copy or symlink the add-in folder from this repo:
-
-- macOS: `~/Library/Application Support/Autodesk/Autodesk Fusion 360/API/AddIns`
-- Windows: `%APPDATA%\\Autodesk\\Autodesk Fusion 360\\API\\AddIns`
+Fusion add-ins must live in Fusion’s AddIns folder.
 
 From this repo, copy:
-`fusion_rpc_addin/FusionRPCAddIn` -> Fusion AddIns folder
+`FusionRPCAddIn.py` -> Fusion AddIns folder
 
-Recommended (keeps hot-reload in sync with this repo):
-```bash
-ln -sfn "$(pwd)/fusion_rpc_addin/FusionRPCAddIn/FusionRPCAddIn.py" \
-  "~/Library/Application Support/Autodesk/Autodesk Fusion 360/API/AddIns/FusionRPCAddIn/FusionRPCAddIn.py"
-ln -sfn "$(pwd)/fusion_rpc_addin/FusionRPCAddIn/commands" \
-  "~/Library/Application Support/Autodesk/Autodesk Fusion 360/API/AddIns/FusionRPCAddIn/commands"
-```
+Fusion AddIns folder:
+- macOS: `~/Library/Application Support/Autodesk/Autodesk Fusion 360/API/AddIns`
+- Windows: `%APPDATA%\\Autodesk\\Autodesk Fusion 360\\API\\AddIns`
 
 ### Run the Add-In
 1) Fusion -> Utilities -> Add-Ins -> Scripts and Add-Ins
@@ -27,21 +20,18 @@ ln -sfn "$(pwd)/fusion_rpc_addin/FusionRPCAddIn/commands" \
 
 ### Test from Terminal
 ```bash
-python3 scripts/fusion_rpc_client.py ping
-python3 scripts/fusion_rpc_client.py list_bodies
-python3 scripts/fusion_rpc_client.py measure_bbox
-python3 scripts/fusion_rpc_client.py measure_bbox --body "Body1"
+python3 fusion_rpc_client.py run_python --code "result = {'ok': True}"
 ```
 
-### Runtime Commands (No Add-In Toggle Needed)
-The add-in discovers command modules from `FusionRPCAddIn/commands/` (one file per command). After initial add-in load, you can add new command files and hot-reload:
+### Runtime Execution
+The add-in exposes a single `run_python` command that executes trusted Python in the add-in process. The code runs on Fusion’s main thread via the existing custom event pipeline.
 
 ```bash
-python3 scripts/fusion_rpc_client.py help
-python3 scripts/fusion_rpc_client.py reload_commands
+python3 fusion_rpc_client.py run_python --code "result = app.activeProduct is not None"
+python3 fusion_rpc_client.py run_python --code "print('hello'); result = 123" --label hello
 ```
 
 ## Files
-- `fusion_rpc_addin/FusionRPCAddIn/`: Fusion RPC add-in (authoritative execution engine).
-- `scripts/fusion_rpc_client.py`: CLI for sending RPC commands.
+- `FusionRPCAddIn.py`: Fusion RPC add-in (authoritative execution engine).
+- `fusion_rpc_client.py`: CLI for sending RPC commands.
 - `logs/`: Captures, snapshots, and observations (created at runtime).

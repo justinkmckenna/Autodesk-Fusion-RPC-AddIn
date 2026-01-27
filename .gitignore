@@ -1,6 +1,5 @@
 # Logs/artifacts
 logs/
-error.log
 
 # OS junk
 .DS_Store
