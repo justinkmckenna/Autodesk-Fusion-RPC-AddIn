@@ -5,17 +5,18 @@ app = adsk.core.Application.get()
 design = adsk.fusion.Design.cast(app.activeProduct)
 root = design.rootComponent if design else None
 
-try:
-    body_name = body_name
-except NameError:
-    body_name = None
+body_name = locals().get("body_name")
 
 if not root:
     result = {"ok": False, "error": "No active design"}
 elif not body_name:
     result = {"ok": False, "error": "Missing body_name input"}
 else:
-    body = next((b for b in root.bRepBodies if b.isVisible and b.isSolid and b.name == body_name), None)
+    body = None
+    for b in root.bRepBodies:
+        if b.isVisible and b.isSolid and b.name == body_name:
+            body = b
+            break
     if not body:
         result = {"ok": False, "error": f"Body not found: {body_name}"}
     else:
